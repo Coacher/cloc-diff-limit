@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SHELLCHECK_VERSION: "0.11.0"
+  LATEST_CLOC: "2.10"
+  OLDEST_CLOC: "1.86"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ShellCheck ${{ env.SHELLCHECK_VERSION }} and checkbashisms
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" |
+            tar -xJ --strip-components=1 -C "${RUNNER_TEMP}" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          echo "${RUNNER_TEMP}" >>"${GITHUB_PATH}"
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends devscripts
+
+      - name: Lint
+        run: |
+          shellcheck --version
+          make lint
+
+  test:
+    name: Test (${{ matrix.shell }}, cloc ${{ matrix.cloc }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Every POSIX shell with the latest cloc release...
+          - { shell: dash, cloc: latest }
+          - { shell: posh, cloc: latest }
+          - { shell: yash --posix, cloc: latest }
+          - { shell: busybox sh, cloc: latest }
+          - { shell: bash --posix, cloc: latest }
+          # ...and the other ways people get cloc.
+          - { shell: dash, cloc: oldest }
+          - { shell: dash, cloc: apt }
+          - { shell: dash, cloc: npm }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install bats and shells
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends bats posh yash busybox
+
+      - name: Install cloc (${{ matrix.cloc }})
+        env:
+          CLOC: ${{ matrix.cloc }}
+        run: |
+          case "${CLOC}" in
+            apt) sudo apt-get install -y -q --no-install-recommends cloc ;;
+            npm) npm install -g cloc ;;
+            *)
+              if [ "${CLOC}" = latest ]; then v="${LATEST_CLOC}"; else v="${OLDEST_CLOC}"; fi
+              # Release tags gained a "v" prefix in cloc 1.90.
+              for tag in "v${v}" "${v}"; do
+                url="https://github.com/AlDanial/cloc/releases/download/${tag}/cloc-${v}.pl"
+                if sudo curl -fsSL -o /usr/local/bin/cloc "${url}"; then break; fi
+              done
+              sudo chmod +x /usr/local/bin/cloc
+              ;;
+          esac
+          echo "cloc $(cloc --version)"
+
+      - name: Test
+        env:
+          HOOK_SHELL: ${{ matrix.shell }}
+        run: make test
+
+  test-macos:
+    name: Test (macOS /bin/sh, Homebrew cloc)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install bats and cloc
+        run: brew install bats-core cloc
+
+      - name: Test
+        env:
+          HOOK_SHELL: /bin/sh
+        run: make test
+
+  integration:
+    name: pre-commit (${{ matrix.hook }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        hook: [cloc-diff-limit, cloc-diff-limit-npm]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install bats and pre-commit
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends bats
+          pipx install pre-commit
+
+      # The npm hook must work without any cloc installed, so only the
+      # system hook gets one.
+      - name: Install cloc
+        if: matrix.hook == 'cloc-diff-limit'
+        run: sudo apt-get install -y -q --no-install-recommends cloc
+
+      - name: Test
+        env:
+          HOOK_ID: ${{ matrix.hook }}
+        run: bats test/integration/

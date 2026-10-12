@@ -1,0 +1,2 @@
+# Shell scripts break with CRLF line endings, so check everything out with LF.
+* text=auto eol=lf

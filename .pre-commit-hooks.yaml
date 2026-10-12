@@ -1,0 +1,20 @@
+- id: cloc-diff-limit
+  name: limit lines of code per commit (cloc)
+  description: Fails when the staged diff exceeds total/added/removed/changed line-of-code limits. Uses cloc from PATH.
+  entry: cloc-diff-limit
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]
+  minimum_pre_commit_version: "3.2.0"
+
+- id: cloc-diff-limit-npm
+  name: limit lines of code per commit (cloc, auto-installed)
+  description: Same as cloc-diff-limit, but pre-commit installs cloc from npm, so only perl is required.
+  entry: cloc-diff-limit
+  language: node
+  additional_dependencies: [cloc@2.6.0-cloc]
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]
+  minimum_pre_commit_version: "3.2.0"

@@ -1,0 +1,102 @@
+#!/bin/sh
+# cloc-diff-limit: fail a commit whose staged diff exceeds line-of-code limits.
+# Thin wrapper around `cloc --git --diff <base> <staged-tree>`; cloc does all counting.
+#
+# Usage: cloc-diff-limit [--max-total N] [--max-added N] [--max-removed N]
+#                        [--max-changed N] [--include-comments] [--base REF]
+#                        [-v|--verbose] [CLOC_OPTION...]
+#   N = -1 means "no limit" (the default for every limit).
+#   Any other option (e.g. --exclude-dir=tests --exclude-ext=sql) goes to cloc.
+set -eu
+
+me=cloc-diff-limit
+total=-1 added=-1 removed=-1 changed=-1 comments=0 verbose=0 base=
+die() { printf '%s: %s\n' "$me" "$*" >&2; exit 2; }
+isnum() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
+num() { [ "$2" = -1 ] || isnum "$2" || die "$1 expects an integer >= -1, got '$2'"; }
+
+n=$#
+while [ "$n" -gt 0 ]; do
+  a=$1; shift; n=$((n - 1)); v=
+  case $a in
+    --max-*=* | --base=*) v=${a#*=}; a=${a%%=*} ;;
+    --max-* | --base) [ "$n" -gt 0 ] || die "$a needs a value"; v=$1; shift; n=$((n - 1)) ;;
+  esac
+  case $a in
+    --max-total)   num "$a" "$v"; total=$v ;;
+    --max-added)   num "$a" "$v"; added=$v ;;
+    --max-removed) num "$a" "$v"; removed=$v ;;
+    --max-changed) num "$a" "$v"; changed=$v ;;
+    --base) base=$v ;;
+    --include-comments) comments=1 ;;
+    -v | --verbose) verbose=1 ;;
+    -h | --help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) set -- ${1+"$@"} "$a" ;;   # pass through to cloc, order preserved
+  esac
+done
+
+command -v cloc >/dev/null 2>&1 ||
+  die "cloc not found on PATH (install: brew/apt/dnf/choco install cloc, or npm i -g cloc)"
+
+if [ -z "$base" ]; then
+  # A merge commit's diff against HEAD is the whole merged branch; don't judge it.
+  merge_head=$(git rev-parse --git-path MERGE_HEAD) || die "not inside a git repository"
+  if [ -f "$merge_head" ]; then exit 0; fi
+  base=$(git rev-parse --verify -q HEAD) || base=$(git hash-object -t tree /dev/null)
+fi
+tree=$(git write-tree) || die "could not write the index as a tree"
+
+# ${1+"$@"} rather than "$@": some older shells reject "$@" under set -u when $# is 0.
+report=$(cloc --git --diff "$base" "$tree" --quiet --hide-rate --skip-uniqueness ${1+"$@"}) ||
+  die "cloc failed"
+
+# The report ends with cloc's own totals, one row per kind of change:
+#   SUM:
+#    same      <files> <blank> <comment> <code>
+#    modified  ...
+#    added     ...
+#    removed   ...
+# An empty diff prints "Nothing to count." instead, which means all zeros.
+a=0 r=0 m=0 in_sum=0
+if [ "$report" != "Nothing to count." ]; then
+  # Fed by a here-document, not a pipe, so the loop's variables survive it.
+  while read -r kind _files _blank comment code _rest; do
+    if [ "$in_sum" -eq 0 ]; then
+      if [ "$kind" = SUM: ]; then in_sum=1; fi
+      continue
+    fi
+    case $kind in added | removed | modified) ;; *) continue ;; esac
+    if ! isnum "$comment" || ! isnum "$code"; then
+      die "unexpected cloc output: $kind $comment $code"
+    fi
+    lines=$((code + comments * comment))
+    case $kind in
+      added) a=$lines ;;
+      removed) r=$lines ;;
+      modified) m=$lines ;;
+    esac
+  done <<EOF
+$report
+EOF
+  [ "$in_sum" -eq 1 ] || die "no SUM: block in cloc output (do not pass cloc output-format options)"
+fi
+t=$((a + r + m))
+
+# Prints one line per exceeded limit, nothing otherwise. Limit -1 never fails.
+over() { if [ "$3" -ge 0 ] && [ "$2" -gt "$3" ]; then printf '  %-8s %6d > %d\n' "$1" "$2" "$3"; fi; }
+bad=$(
+  over total "$t" "$total"
+  over added "$a" "$added"
+  over removed "$r" "$removed"
+  over changed "$m" "$changed"
+)
+
+if [ "$comments" -eq 1 ]; then counted='code+comment'; else counted='code'; fi
+if [ "$verbose" -eq 1 ] || [ -n "$bad" ]; then
+  printf '%s: %s lines: total %d (added %d, removed %d, changed %d)\n' \
+    "$me" "$counted" "$t" "$a" "$r" "$m"
+fi
+if [ -n "$bad" ]; then
+  printf '%s: commit exceeds limits:\n%s\n' "$me" "$bad"
+  exit 1
+fi

@@ -1,0 +1,8 @@
+{
+  "name": "cloc-diff-limit",
+  "version": "1.0.0",
+  "description": "pre-commit hook: limit lines of code per commit, a thin wrapper around cloc",
+  "license": "MIT",
+  "bin": { "cloc-diff-limit": "cloc-diff-limit" },
+  "files": ["cloc-diff-limit"]
+}
